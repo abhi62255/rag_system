@@ -171,6 +171,7 @@ rag-system/
 └── docker-compose.yml
 ```
 
+
 ## Configuration (`.env`)
 
 | Variable                    | Default              | Description                          |
