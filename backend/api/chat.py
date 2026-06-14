@@ -1,10 +1,11 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from pipelines.retrieval.graph import invoke_graph
+from api.deps import get_rag_agent
+from pipelines.retrieval.graph import RAGAgent
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +33,12 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    agent: RAGAgent = Depends(get_rag_agent),
+):
     try:
-        answer, sources = invoke_graph(
+        answer, sources = agent.answer_question(
             user_message=request.message,
             session_id=request.session_id,
         )

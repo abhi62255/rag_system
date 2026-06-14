@@ -10,7 +10,7 @@ from config import settings
 from models.db import init_db
 from api.chat import router as chat_router
 from api.admin import router as admin_router
-from pipelines.ingestion.sync import run_sync
+from pipelines.ingestion.sync import run_sync_job
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
 
     # Schedule daily ingestion sync
     scheduler.add_job(
-        run_sync,
+        run_sync_job,
         trigger="cron",
         hour=settings.ingestion_schedule_hour,
         minute=settings.ingestion_schedule_minute,
@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     # Run initial sync on startup
     logger.info("Running initial ingestion sync on startup...")
     try:
-        stats = run_sync()
+        stats = run_sync_job()
         logger.info(f"Startup sync complete: {stats}")
     except Exception as e:
         logger.warning(f"Startup sync failed (non-fatal): {e}")

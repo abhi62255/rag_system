@@ -1,18 +1,21 @@
 import logging
 import os
-import shutil
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
 from config import settings
-from models.db import get_db, TrackedDocument
-from pipelines.ingestion.file_tracker import get_all_docs, mark_doc_deleted
-from pipelines.ingestion.sync import run_sync, ingest_single_file
-from pipelines.ingestion.vector_store import delete_chunks, get_collection_stats
+from models.db import TrackedDocument
+from api.deps import (
+    get_document_tracker,
+    get_vector_store_service,
+    get_ingestion_pipeline,
+)
+from pipelines.ingestion.file_tracker import DocumentTracker
+from pipelines.ingestion.vector_store import VectorStoreService
+from pipelines.ingestion.sync import IngestionPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +55,11 @@ class StatsResponse(BaseModel):
 
 
 @router.post("/ingest/trigger", response_model=SyncResponse)
-async def trigger_ingestion():
+async def trigger_ingestion(
+    pipeline: IngestionPipeline = Depends(get_ingestion_pipeline),
+):
     try:
-        stats = run_sync()
+        stats = pipeline.sync_directory()
         return SyncResponse(**{k: v for k, v in stats.items() if k != "error"}, error=stats.get("error"))
     except Exception as e:
         logger.error(f"Manual sync failed: {e}", exc_info=True)
@@ -62,7 +67,10 @@ async def trigger_ingestion():
 
 
 @router.post("/ingest/upload")
-async def upload_and_ingest(file: UploadFile = File(...)):
+async def upload_and_ingest(
+    file: UploadFile = File(...),
+    pipeline: IngestionPipeline = Depends(get_ingestion_pipeline),
+):
     allowed_ext = {".pdf", ".docx", ".doc", ".html", ".htm", ".txt", ".md"}
     ext = Path(file.filename).suffix.lower()
     if ext not in allowed_ext:
@@ -74,7 +82,7 @@ async def upload_and_ingest(file: UploadFile = File(...)):
             content = await file.read()
             f.write(content)
 
-        result = ingest_single_file(dest_path)
+        result = pipeline.ingest_file(dest_path)
         return {"filename": file.filename, **result}
     except Exception as e:
         if os.path.exists(dest_path):
@@ -83,20 +91,26 @@ async def upload_and_ingest(file: UploadFile = File(...)):
 
 
 @router.get("/documents", response_model=list[DocumentStatus])
-def list_documents(db: Session = Depends(get_db)):
-    docs = get_all_docs(db)
+def list_documents(
+    tracker: DocumentTracker = Depends(get_document_tracker),
+):
+    docs = tracker.get_all_docs()
     return [DocumentStatus(**doc.to_dict()) for doc in docs]
 
 
 @router.delete("/documents/{doc_id}")
-def delete_document(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.query(TrackedDocument).filter(TrackedDocument.id == doc_id).first()
+def delete_document(
+    doc_id: int,
+    tracker: DocumentTracker = Depends(get_document_tracker),
+    vector_store: VectorStoreService = Depends(get_vector_store_service),
+):
+    doc = tracker.db.query(TrackedDocument).filter(TrackedDocument.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
     chunk_ids = doc.get_chunk_ids()
     if chunk_ids:
-        delete_chunks(chunk_ids)
+        vector_store.delete_chunks(chunk_ids)
 
     # Remove physical file if it exists
     if os.path.exists(doc.filepath):
@@ -105,14 +119,17 @@ def delete_document(doc_id: int, db: Session = Depends(get_db)):
         except Exception as e:
             logger.warning(f"Could not remove file {doc.filepath}: {e}")
 
-    mark_doc_deleted(db, doc)
+    tracker.mark_doc_deleted(doc)
     return {"status": "deleted", "filename": doc.filename, "chunks_removed": len(chunk_ids)}
 
 
 @router.get("/stats", response_model=StatsResponse)
-def get_stats(db: Session = Depends(get_db)):
-    chroma_stats = get_collection_stats()
-    all_docs = get_all_docs(db)
+def get_stats(
+    tracker: DocumentTracker = Depends(get_document_tracker),
+    vector_store: VectorStoreService = Depends(get_vector_store_service),
+):
+    chroma_stats = vector_store.get_collection_stats()
+    all_docs = tracker.get_all_docs()
     active = sum(1 for d in all_docs if d.status == "active")
     deleted = sum(1 for d in all_docs if d.status == "deleted")
 
